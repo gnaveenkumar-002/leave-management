@@ -2,9 +2,21 @@
 # https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-config.html
 version = 0.1
 
-[default.global.parameters]
-stack_name = "Leave-Management-App"
+[dev.deploy.parameters]
+stack_name = "leave-management-dev"
 region = "ap-south-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+fail_on_empty_changeset = false
+resolve_s3 = true
+
+[prod.deploy.parameters]
+stack_name = "leave-management-prod"
+region = "ap-south-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+fail_on_empty_changeset = false
+resolve_s3 = true
 
 [default.build.parameters]
 cached = true
