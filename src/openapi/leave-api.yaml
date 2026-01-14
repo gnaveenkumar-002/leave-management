@@ -1,0 +1,53 @@
+openapi: 3.0.1
+info:
+  title: Leave Management API
+  description: API Gateway to Step Functions based Leave Approval System
+  version: 1.0.0
+
+paths:
+  /leave/apply:
+    post:
+      summary: Apply for leave
+      description: Starts the leave approval Step Function
+      responses:
+        "200":
+          description: Step Function execution started
+      x-amazon-apigateway-integration:
+        type: aws
+        httpMethod: POST
+        credentials:
+          Fn::GetAtt: [ApiGatewayStepFunctionRole, Arn]
+        uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:states:action/StartExecution
+        requestTemplates:
+          application/json: |
+            {
+              "stateMachineArn": "${LeaveApprovalStateMachine}",
+              "input": "$util.escapeJavaScript($input.body)"
+            }
+        passthroughBehavior: when_no_match
+
+  /approve:
+    get:
+      summary: Manager approval callback
+      description: Callback endpoint used by manager approval link
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: decision
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [APPROVE, REJECT]
+      responses:
+        "200":
+          description: Approval recorded
+      x-amazon-apigateway-integration:
+        type: aws_proxy
+        httpMethod: POST
+        uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApproveFunction.Arn}/invocations

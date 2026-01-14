@@ -1,0 +1,56 @@
+{
+    "Comment": "Leave Management – Human Approval Workflow",
+    "StartAt": "ApplyLeave",
+    "States": {
+        "ApplyLeave": {
+            "Type": "Task",
+            "Resource": "${ApplyLeaveFunctionArn}",
+            "ResultPath": "$.leave",
+            "Next": "NotifyManager"
+        },
+        "NotifyManager": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+            "Parameters": {
+                "FunctionName": "${NotifyFunctionArn}",
+                "Payload": {
+                    "type": "MANAGER",
+                    "leave.$": "$.leave",
+                    "taskToken.$": "$$.Task.Token"
+                }
+            },
+            "ResultPath": "$.approvalResult",
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "REJECTED"
+                    ],
+                    "ResultPath": "$.approvalResult",
+                    "Next": "MarkRejected"
+                }
+            ],
+            "Next": "MarkApproved"
+        },
+        "MarkApproved": {
+            "Type": "Pass",
+            "Result": "APPROVED",
+            "ResultPath": "$.leave.status",
+            "Next": "NotifyEmployee"
+        },
+        "MarkRejected": {
+            "Type": "Pass",
+            "Result": "REJECTED",
+            "ResultPath": "$.leave.status",
+            "Next": "NotifyEmployee"
+        },
+        "NotifyEmployee": {
+            "Type": "Task",
+            "Resource": "${NotifyFunctionArn}",
+            "Parameters": {
+                "type": "EMPLOYEE",
+                "leave.$": "$.leave"
+            },
+            "End": true
+        }
+    }
+}

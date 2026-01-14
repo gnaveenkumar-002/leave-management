@@ -1,0 +1,219 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Leave Management System - API to Step Functions
+
+Parameters:
+  AppName:
+    Type: String
+    Default: leave-mgmt
+
+Globals:
+  Function:
+    Runtime: nodejs24.x
+    Timeout: 30
+    MemorySize: 128
+    Environment:
+      Variables:
+        LEAVE_TABLE: !Sub "${AppName}-${AWS::StackName}-LeaveRequests"
+        SES_FROM: gnaveenkumargnk8@gmail.com
+        APPROVE_URL: !Sub "https://${LeaveApi}.execute-api.${AWS::Region}.amazonaws.com/prod/approve"
+Resources:
+
+  LeaveRequestsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${AppName}-${AWS::StackName}-LeaveRequests"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: leaveId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: leaveId
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+
+  ApplyLeaveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: applyLeave.handler
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref LeaveRequestsTable
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints:
+          - src/handlers/applyLeave.ts
+        Bundle: true
+        Minify: true
+        Target: es2020
+
+  NotifyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: notify.handler
+      Environment:
+        Variables:
+          API_URL: !Sub "https://${LeaveApi}.execute-api.${AWS::Region}.amazonaws.com/prod/approve"
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action:
+              - ses:SendEmail
+              - ses:SendRawEmail
+            Resource: "*"
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints:
+          - src/notify/notify.ts
+        Bundle: true
+        Minify: true
+        Target: es2020
+
+  ApproveFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: approve.handler
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref LeaveRequestsTable
+        - Statement:
+            Effect: Allow
+            Action:
+              - states:SendTaskSuccess
+              - states:SendTaskFailure
+            Resource: "*"
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints:
+          - src/handlers/approve.ts
+        Bundle: true
+        Minify: true
+        Target: es2020
+
+  LeaveApprovalStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "${AppName}-${AWS::StackName}-StateMachine"
+      DefinitionUri: src/step-functions/leaveApproval.asl.json
+      DefinitionSubstitutions:
+        ApplyLeaveFunctionArn: !GetAtt ApplyLeaveFunction.Arn
+        NotifyFunctionArn: !GetAtt NotifyFunction.Arn
+        ApprovalCallbackFunctionArn: !GetAtt ApproveFunction.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ApplyLeaveFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref NotifyFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ApproveFunction
+
+  LeaveApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${AppName}-${AWS::StackName}-Api"
+
+  LeaveResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref LeaveApi
+      ParentId: !GetAtt LeaveApi.RootResourceId
+      PathPart: leave
+
+  ApplyLeaveResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref LeaveApi
+      ParentId: !Ref LeaveResource
+      PathPart: apply
+
+  ApplyLeaveMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref LeaveApi
+      ResourceId: !Ref ApplyLeaveResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:states:action/StartExecution
+        Credentials: !GetAtt ApiGatewayStepFunctionRole.Arn
+        RequestTemplates:
+          application/json: !Sub |
+            {
+              "stateMachineArn": "${LeaveApprovalStateMachine}",
+              "input": "$util.escapeJavaScript($input.body)"
+            }
+        IntegrationResponses:
+          - StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+  ApproveResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref LeaveApi
+      ParentId: !GetAtt LeaveApi.RootResourceId
+      PathPart: approve
+  ApproveMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref LeaveApi
+      ResourceId: !Ref ApproveResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApproveFunction.Arn}/invocations
+      MethodResponses:
+        - StatusCode: 200
+  ApproveLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ApproveFunction
+      Principal: apigateway.amazonaws.com
+  LeaveApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ApplyLeaveMethod
+      - ApproveMethod
+    Properties:
+      RestApiId: !Ref LeaveApi
+
+  LeaveApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      StageName: prod
+      RestApiId: !Ref LeaveApi
+      DeploymentId: !Ref LeaveApiDeployment
+
+  ApiGatewayStepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}-${AWS::StackName}-ApiGwSFRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartStepFunctionExecution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !Ref LeaveApprovalStateMachine
+
+Outputs:
+  ApiUrl:
+    Value: !Sub https://${LeaveApi}.execute-api.${AWS::Region}.amazonaws.com/prod/leave/apply
